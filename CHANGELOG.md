@@ -55,6 +55,7 @@
 - PR #3427 Define and Implement new multi-search API
 - PR #3442 Add Bool-index + Multi column + DataFrame support for set-item
 - PR #3172 Define and implement new fill/repeat/copy_range APIs
+- PR #3490 Add pair iterators for columns
 
 
 ## Improvements
@@ -150,7 +151,7 @@
 - PR #3380 Concatenate columns of strings
 - PR #3382 Add fill function for strings column
 - PR #3391 Move device_atomics_tests.cu files to legacy
-- PR #3303 Define and implement new stream compaction APIs `copy_if`, `drop_nulls`, 
+- PR #3303 Define and implement new stream compaction APIs `copy_if`, `drop_nulls`,
            `apply_boolean_mask`, `drop_duplicate` and `unique_count`.
 - PR #3387 Strings column gather function
 - PR #3440 Strings column scatter function
@@ -161,6 +162,10 @@
 - PR #3422 Move utilities to legacy
 - PR #3201 Define and implement new datetime_ops APIs
 - PR #3461 Add a new overload to allocate_like() that takes explicit type and size params.
+- PR #3448 Port scatter_to_tables to libcudf++
+- PR #3458 Update strings sections in the transition guide
+- PR #3462 Add `make_empty_column` and update `empty_like`.
+- PR #3214 Define and implement new unary operations APIs
 
 ## Bug Fixes
 
@@ -221,6 +226,9 @@
 - PR #3439 Fix index-name bug in StringColumn concat
 - PR #3445 Fix ORC Writer default stripe size
 - PR #3459 Fix printing of invalid entries
+- PR #3468 Fix memory leak issue in `drop_duplicates`
+- PR #3474 Fix small doc error in capitalize Docs
+- PR #3476 Fix ORC reader timezone conversion
 
 # cuDF 0.10.0 (16 Oct 2019)
 
