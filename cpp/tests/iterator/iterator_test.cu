@@ -342,6 +342,18 @@ TYPED_TEST(IteratorTest, large_size_reduction) {
   this->iterator_test_cub(expected_value, it_dev, d_col->size());
 }
 
+struct add_meanvar {
+  template <typename T>
+  CUDA_HOST_DEVICE_CALLABLE thrust::pair<T, bool> operator()( const thrust::pair<T, bool>& lhs, const thrust::pair<T, bool>& rhs) {
+    if (lhs.second & rhs.second)
+      return thrust::pair<T, bool>{lhs.first+rhs.first, true};
+    else if (lhs.second)
+      return thrust::pair<T, bool>{lhs};
+    else 
+      return thrust::pair<T, bool>{rhs};
+  }
+};
+
 template <typename T>
 struct PairIteratorTest : public cudf::test::BaseFixture {};
 TYPED_TEST_CASE(PairIteratorTest, cudf::test::NumericTypes);
@@ -352,13 +364,12 @@ TYPED_TEST_CASE(PairIteratorTest, cudf::test::NumericTypes);
 // This test computes `count`, `sum`, `sum_of_squares` at a single reduction call.
 // It would be useful for `var`, `std` operation
 TYPED_TEST(PairIteratorTest, mean_var_output) {
-  using T = int32_t;
-  using T_upcast = TypeParam;
-  using T_output = cudf::meanvar<T_upcast>;
-  cudf::transformer_meanvar<T_upcast> transformer{};
+  using T = TypeParam;
+  using T_output = cudf::meanvar<T>;
+  cudf::transformer_meanvar<T> transformer{};
 
   const int column_size{5000};
-  const T_upcast init{0};
+  const T init{0};
 
   // data and valid arrays
   std::vector<T> host_values(column_size);
@@ -378,16 +389,16 @@ TYPED_TEST(PairIteratorTest, mean_var_output) {
 
   expected_value.count = d_col->size() - d_col->null_count();
 
-  std::vector<T_upcast> replaced_array(d_col->size());
+  std::vector<T> replaced_array(d_col->size());
   std::transform(host_values.begin(), host_values.end(), host_bools.begin(),
                  replaced_array.begin(),
-                 [&](T x, bool b) { return (b) ? static_cast<T_upcast>(x) : init; });
+                 [&](T x, bool b) { return (b) ? static_cast<T>(x) : init; });
 
   expected_value.count = d_col->size() - d_col->null_count();
   expected_value.value = std::accumulate(replaced_array.begin(),
-                                         replaced_array.end(), T_upcast{0});
+                                         replaced_array.end(), T{0});
   expected_value.value_squared =
-      std::accumulate(replaced_array.begin(), replaced_array.end(), T_upcast{0},
+      std::accumulate(replaced_array.begin(), replaced_array.end(), T{0},
                       [](T acc, T i) { return acc + i * i; });
 
   std::cout << "expected <mixed_output> = " << expected_value << std::endl;
@@ -395,8 +406,8 @@ TYPED_TEST(PairIteratorTest, mean_var_output) {
   // GPU test
   auto it_dev = cudf::experimental::detail::make_pair_iterator<T, true>(*d_col);
   auto it_dev_squared = thrust::make_transform_iterator(it_dev, transformer);
-  auto result = thrust::reduce( it_dev_squared, it_dev_squared+ d_col->size());
-  EXPECT_EQ(expected_value, result) << "pair iterator reduction sum";
+  auto result = thrust::reduce( it_dev_squared, it_dev_squared+ d_col->size(), thrust::make_pair(T_output{}, true), add_meanvar{} );
+  EXPECT_EQ(expected_value, result.first) << "pair iterator reduction sum";
 }
 #endif
 
@@ -430,13 +441,24 @@ TYPED_TEST(IteratorTest, error_handling) {
   CUDF_EXPECT_THROW_MESSAGE((d_col_null->begin<T>()),
                             "Unexpected column with nulls.");
 
-  CUDF_EXPECT_THROW_MESSAGE((cudf::experimental::detail::make_null_replacement_pair_iterator(*d_col_no_null, T{0})),
-                            "Unexpected non-nullable column.");
-
   CUDF_EXPECT_THROW_MESSAGE((cudf::experimental::detail::make_pair_iterator<T, true>(*d_col_no_null)),
                             "Unexpected non-nullable column.");
   CUDF_EXPECT_NO_THROW((cudf::experimental::detail::make_pair_iterator<T, false>(*d_col_null)));
   CUDF_EXPECT_NO_THROW((cudf::experimental::detail::make_pair_iterator<T, true>(*d_col_null)));
+
+  //scalar iterator
+  using ScalarType = cudf::experimental::scalar_type_t<T>;
+  std::unique_ptr<cudf::scalar> s(new ScalarType{T{1}, false});
+  CUDF_EXPECT_THROW_MESSAGE((cudf::experimental::detail::make_scalar_iterator<T>(*s)),
+                            "the scalar value must be valid");
+  CUDF_EXPECT_NO_THROW((cudf::experimental::detail::make_scalar_pair_iterator<T>(*s)));
+  // expects error: data type mismatch
+  if (!(std::is_same<T, double>::value)) {
+    CUDF_EXPECT_THROW_MESSAGE((cudf::experimental::detail::make_scalar_iterator<double>(*s)),
+                              "the data type mismatch");
+    CUDF_EXPECT_THROW_MESSAGE((cudf::experimental::detail::make_scalar_pair_iterator<double>(*s)),
+                              "the data type mismatch");
+  }
 }
 
 struct StringIteratorTest :  public IteratorTest<cudf::string_view> { 
@@ -521,7 +543,6 @@ TYPED_TEST(IteratorTest, nonull_pair_iterator) {
 
 TYPED_TEST(IteratorTest, null_pair_iterator) {
   using T = TypeParam;
-  auto init = thrust::pair<T,bool>{0, false};
   // data and valid arrays
   std::vector<T> host_values({0, 6, 0, -14, 13, 64, -13, -20, 45});
   std::vector<bool> host_bools({1, 1, 0, 1, 1, 1, 0, 1, 1});
@@ -532,14 +553,70 @@ TYPED_TEST(IteratorTest, null_pair_iterator) {
   auto d_col = cudf::column_device_view::create(w_col);
  
   // calculate the expected value by CPU.
-  std::vector<thrust::pair<T,bool> > replaced_array(host_values.size());
+  std::vector<thrust::pair<T,bool> > value_and_validity(host_values.size());
   std::transform(host_values.begin(), host_values.end(), host_bools.begin(),
-                 replaced_array.begin(),
-                 [init](auto s, auto b) { return (b) ? thrust::make_pair(s, true) : init; });
+                 value_and_validity.begin(),
+                 [](auto s, auto b) { return thrust::pair<T, bool>{s, b}; });
+  std::vector<thrust::pair<T,bool> > value_all_valid(host_values.size());
+  std::transform(host_values.begin(), host_values.end(), host_bools.begin(),
+                 value_all_valid.begin(),
+                 [](auto s, auto b) { return thrust::pair<T, bool>{s, true}; });
 
   // GPU test
-  auto it_dev = cudf::experimental::detail::make_null_replacement_pair_iterator(*d_col, T{0});
-  this->iterator_test_thrust(replaced_array, it_dev, host_values.size());
+  auto it_dev = cudf::experimental::detail::make_pair_iterator<T, true>(*d_col);
+  this->iterator_test_thrust(value_and_validity, it_dev, host_values.size());
+
+  auto it_hasnonull_dev = cudf::experimental::detail::make_pair_iterator<T, false>(*d_col);
+  this->iterator_test_thrust(value_all_valid, it_hasnonull_dev, host_values.size());
+  
   auto itb_dev = cudf::experimental::detail::make_validity_iterator(*d_col);
   this->iterator_test_thrust(host_bools, itb_dev, host_values.size());
+}
+
+TYPED_TEST(IteratorTest, scalar_iterator) {
+  using T = TypeParam;
+  T init = static_cast<T>(random_int(-128, 128));
+  // data and valid arrays
+  std::vector<T> host_values(100, init);
+  std::vector<bool> host_bools(100, true);
+
+  // create a scalar
+  using ScalarType = cudf::experimental::scalar_type_t<T>;
+  std::unique_ptr<cudf::scalar> s(new ScalarType{init, true});
+ 
+  // calculate the expected value by CPU.
+  std::vector<thrust::pair<T,bool> > value_and_validity(host_values.size());
+  std::transform(host_values.begin(), host_values.end(), host_bools.begin(),
+                 value_and_validity.begin(),
+                 [](auto v, auto b) { return thrust::pair<T, bool>{v, b}; });
+
+  // GPU test
+  auto it_dev = cudf::experimental::detail::make_scalar_iterator<T>(*s);
+  this->iterator_test_thrust(host_values, it_dev, host_values.size());
+
+  auto it_pair_dev = cudf::experimental::detail::make_scalar_pair_iterator<T>(*s);
+  this->iterator_test_thrust(value_and_validity, it_pair_dev, host_values.size());
+}
+
+
+TYPED_TEST(IteratorTest, null_scalar_iterator) {
+  using T = TypeParam;
+  T init = static_cast<T>(random_int(-128, 128));
+  // data and valid arrays
+  std::vector<T> host_values(100, init);
+  std::vector<bool> host_bools(100, true);
+
+  // create a scalar
+  using ScalarType = cudf::experimental::scalar_type_t<T>;
+  std::unique_ptr<cudf::scalar> s(new ScalarType{init, true});
+ 
+  // calculate the expected value by CPU.
+  std::vector<thrust::pair<T,bool> > value_and_validity(host_values.size());
+  std::transform(host_values.begin(), host_values.end(), host_bools.begin(),
+                 value_and_validity.begin(),
+                 [](auto v, auto b) { return thrust::pair<T, bool>{v, b}; });
+
+  // GPU test
+  auto it_pair_dev = cudf::experimental::detail::make_scalar_pair_iterator<T>(*s);
+  this->iterator_test_thrust(value_and_validity, it_pair_dev, host_values.size());
 }
